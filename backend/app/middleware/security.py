@@ -2,6 +2,17 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import RedirectResponse
 from app.core.config import settings
+from app.core.net import get_client_ip, _is_trusted
+
+
+def _request_scheme(request: Request) -> str:
+    """Scheme the client used. Behind a TLS-terminating proxy the app sees plain
+    http, so trust X-Forwarded-Proto — but only from a configured proxy."""
+    peer = request.client.host if request.client else ""
+    forwarded = request.headers.get("x-forwarded-proto")
+    if forwarded and _is_trusted(peer):
+        return forwarded.split(",")[0].strip().lower()
+    return request.url.scheme
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -29,7 +40,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # HTTPS redirect in production
-        if settings.enforce_https and request.url.scheme == "http":
+        if settings.enforce_https and _request_scheme(request) == "http":
             https_url = str(request.url).replace("http://", "https://", 1)
             return RedirectResponse(https_url, status_code=301)
 
@@ -73,7 +84,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             "[MASKED]" if masked else path,
             response.status_code,
             duration,
-            request.client.host if request.client else "unknown",
+            get_client_ip(request),
         )
 
         return response

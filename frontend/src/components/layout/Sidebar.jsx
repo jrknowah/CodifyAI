@@ -6,6 +6,7 @@ const NAV = [
   { to: '/history',   icon: '📋', label: 'Encounter History' },
   { to: '/settings',  icon: '⚙️', label: 'Settings' },
 ]
+const ADMIN_NAV = { to: '/admin', icon: '🛡️', label: 'Admin' }
 
 export default function Sidebar() {
   const { user, logout } = useAuth()
@@ -39,7 +40,7 @@ export default function Sidebar() {
 
       {/* Nav */}
       <nav style={{ flex: 1, padding: '0 0.75rem' }}>
-        {NAV.map(({ to, icon, label }) => (
+        {(user?.role === 'admin' ? [...NAV, ADMIN_NAV] : NAV).map(({ to, icon, label }) => (
           <NavLink key={to} to={to} style={({ isActive }) => ({
             display: 'flex', alignItems: 'center', gap: 10,
             padding: '10px 12px', borderRadius: 8, marginBottom: 4,

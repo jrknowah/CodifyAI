@@ -34,8 +34,11 @@ export default function Dashboard() {
       const detail = err.response?.data?.detail
       if (err.response?.status === 429) {
         setError('Too many requests. Please wait a moment and try again.')
+      } else if (err.response?.status === 403) {
+        setError('Your account has view-only access. Ask an administrator for coder access to run analyses.')
       } else {
-        setError(detail || 'Analysis failed. Please try again.')
+        // 422 validation errors arrive as a list, not a string
+        setError(typeof detail === 'string' ? detail : detail?.[0]?.msg || 'Analysis failed. Please try again.')
       }
     } finally {
       setLoading(false)

@@ -5,10 +5,11 @@ from app.core.config import settings
 
 engine = create_async_engine(
     settings.database_url,
-    echo=settings.app_env == "development",
+    echo=False,               # SQL echo logs bound parameters (hashes, emails)
     pool_pre_ping=True,       # detect stale connections
     pool_size=10,
     max_overflow=20,
+    connect_args={"ssl": "require"} if settings.database_ssl else {},
 )
 
 AsyncSessionLocal = async_sessionmaker(

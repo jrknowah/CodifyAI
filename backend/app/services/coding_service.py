@@ -1,6 +1,7 @@
 import anthropic
 import json
 import hashlib
+import hmac
 from app.core.config import settings
 from app.schemas.schemas import CodeResult, CodingResponse
 from app.models.models import Encounter, FacilityType
@@ -12,7 +13,12 @@ from uuid import UUID
 from datetime import datetime, timezone
 import uuid
 
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+# Async client so a slow model call doesn't block the event loop for every other request.
+client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+# Fields of a code result that are safe to persist. `reason` (and the summary)
+# are written by the model about the note and can quote PHI — never stored.
+PERSISTED_CODE_FIELDS = {"code", "type", "description", "confidence"}
 
 SYSTEM_PROMPT = """You are CodifyAI, an expert medical coder specializing in post-acute care,
 skilled nursing facilities (SNF), recuperative care, and long-term care facilities.
@@ -45,8 +51,9 @@ Coding rules:
 
 
 def _hash_note(note: str) -> str:
-    """SHA-256 hash of note — stored instead of note text (PHI protection)."""
-    return hashlib.sha256(note.encode("utf-8")).hexdigest()
+    """Keyed HMAC-SHA256 of the note — stored instead of note text (PHI protection).
+    Keyed so someone holding a candidate note can't confirm it against the database."""
+    return hmac.new(settings.encryption_key.encode(), note.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 async def analyze_and_persist(
@@ -61,8 +68,8 @@ async def analyze_and_persist(
     Call Claude, parse results, persist encounter (without PHI), write audit log.
     """
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+        message = await client.messages.create(
+            model=settings.anthropic_model,
             max_tokens=1500,
             system=SYSTEM_PROMPT,
             messages=[{
@@ -74,7 +81,11 @@ async def analyze_and_persist(
         await write_audit_log(
             db, AuditAction.analyze, request,
             user_id=user_id,
-            detail={"error": str(e), "facility_type": facility_type},
+            detail={
+                "error": type(e).__name__,
+                "status_code": getattr(e, "status_code", None),
+                "facility_type": facility_type,
+            },
             success=False,
         )
         raise HTTPException(status_code=502, detail="AI service temporarily unavailable.")
@@ -87,7 +98,7 @@ async def analyze_and_persist(
         parsed = json.loads(raw)
         codes = [CodeResult(**c) for c in parsed["codes"]]
         summary = parsed["summary"]
-    except (json.JSONDecodeError, KeyError, Exception) as e:
+    except Exception:
         await write_audit_log(
             db, AuditAction.analyze, request,
             user_id=user_id,
@@ -99,7 +110,8 @@ async def analyze_and_persist(
     encounter_id = uuid.uuid4()
     top_code = codes[0].code if codes else "N/A"
 
-    # Persist encounter — note hash only, never raw note text
+    # Persist encounter — note hash and de-identified codes only; no note text,
+    # no model-written reasons or summary
     encounter = Encounter(
         id=encounter_id,
         user_id=user_id,
@@ -107,8 +119,7 @@ async def analyze_and_persist(
         note_hash=_hash_note(clinical_note),
         note_length=len(clinical_note),
         facility_type=FacilityType(facility_type),
-        codes=[c.model_dump() for c in codes],
-        summary=summary,
+        codes=[c.model_dump(include=PERSISTED_CODE_FIELDS) for c in codes],
         model_used=message.model,
         code_count=len(codes),
         top_code=top_code,
@@ -128,8 +139,6 @@ async def analyze_and_persist(
         },
         success=True,
     )
-
-    await db.flush()
 
     return CodingResponse(
         encounter_id=encounter_id,
