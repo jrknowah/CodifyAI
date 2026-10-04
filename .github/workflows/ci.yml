@@ -1,0 +1,78 @@
+# Runs on every pull request, and before every deploy (called by deploy.yml).
+name: CI
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: codifyai
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: codifyai_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U codifyai"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Dummy values: tests never call Anthropic or touch real secrets.
+      DATABASE_URL: postgresql+asyncpg://codifyai:changeme@localhost:5432/codifyai_test
+      TEST_DATABASE_URL: postgresql+asyncpg://codifyai:changeme@localhost:5432/codifyai_test
+      ANTHROPIC_API_KEY: sk-ant-ci-placeholder
+      SECRET_KEY: ci-only-secret-key-not-used-anywhere-else-0000000000000000
+      REFRESH_SECRET_KEY: ci-only-refresh-key-not-used-anywhere-else-000000000000
+      APP_ENV: test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11" # matches backend/Dockerfile
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: pytest
+
+  frontend:
+    name: Frontend lint and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20" # matches frontend/Dockerfile
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --legacy-peer-deps
+      - run: npm run lint
+      - run: npm run build
+
+  security:
+    name: Dependency and secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for known vulnerabilities and committed secrets
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          # Report-only for now: the pinned dependencies are from April and
+          # will have findings. Flip to "1" once Dependabot has caught them up.
+          exit-code: "0"

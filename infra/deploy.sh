@@ -7,9 +7,13 @@
 # Environment variables (all optional):
 #   SUBSCRIPTION_ID   Azure subscription to use (default: current `az` account)
 #   LOCATION          Azure region (default: southcentralus)
-#   IMAGE_TAG         image tag to deploy (default: current git short SHA)
+#   IMAGE_TAG         commit SHA to deploy (default: current commit); first 7 chars used
 #   ANTHROPIC_API_KEY used on first deploy instead of prompting
 #   ROTATE_ANTHROPIC_KEY=1   prompt for a new Anthropic key on a later deploy
+#
+# In GitHub Actions (CI=true) the script runs non-interactively: no prompts,
+# no provider registration, and it refuses to do a first deploy, because first
+# deploys generate secrets and must be run by hand once per environment.
 #
 # Requires: Azure CLI 2.60+ (`az bicep install` once), git, openssl.
 # Your account needs Owner (or Contributor + User Access Administrator) on the
@@ -28,7 +32,9 @@ cd "$(dirname "$0")/.."   # repo root
 LOCATION="${LOCATION:-southcentralus}"
 SHARED_RG="rg-codifyai-shared"
 RG="rg-codifyai-${ENV}"
-TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
+TAG="${IMAGE_TAG:-$(git rev-parse HEAD)}"
+TAG="${TAG:0:7}"   # same tag whether deployed by hand or by GitHub Actions
+IN_CI="${CI:-false}"
 
 say() { printf '\n\033[1m▸ %s\033[0m\n' "$*"; }
 
@@ -39,7 +45,7 @@ fi
 SUB_NAME="$(az account show --query name -o tsv)"
 say "Subscription: ${SUB_NAME} | environment: ${ENV} | region: ${LOCATION} | image tag: ${TAG}"
 
-if [[ "$ENV" == "prod" ]]; then
+if [[ "$ENV" == "prod" && "$IN_CI" != "true" ]]; then
   echo "This deploys to PRODUCTION, where real PHI lives."
   read -r -p "Type 'prod' to continue: " confirm
   [[ "$confirm" == "prod" ]] || { echo "Aborted."; exit 1; }
@@ -50,16 +56,18 @@ if [[ -n "$(git status --porcelain)" && "$ENV" == "staging" ]]; then
 fi
 
 # ── Resource providers (idempotent) ───────────────────────────────────────────
+if [[ "$IN_CI" != "true" ]]; then
 say "Registering resource providers"
 for ns in Microsoft.App Microsoft.ContainerRegistry Microsoft.DBforPostgreSQL \
           Microsoft.KeyVault Microsoft.ManagedIdentity Microsoft.Network \
           Microsoft.OperationalInsights Microsoft.Insights Microsoft.Storage; do
   az provider register --namespace "$ns" --wait -o none
 done
+fi
 
 # ── Shared registry ───────────────────────────────────────────────────────────
 say "Shared container registry"
-az group create -n "$SHARED_RG" -l "$LOCATION" --tags app=codifyai environment=shared -o none
+[[ "$IN_CI" == "true" ]] || az group create -n "$SHARED_RG" -l "$LOCATION" --tags app=codifyai environment=shared -o none
 ACR_NAME="$(az deployment group create -g "$SHARED_RG" -n shared \
   --template-file infra/shared.bicep --query properties.outputs.acrName.value -o tsv)"
 ACR_SERVER="$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)"
@@ -80,13 +88,18 @@ else
 fi
 
 # ── Secrets: generated on first deploy only ───────────────────────────────────
-az group create -n "$RG" -l "$LOCATION" --tags app=codifyai environment="$ENV" -o none
+[[ "$IN_CI" == "true" ]] || az group create -n "$RG" -l "$LOCATION" --tags app=codifyai environment="$ENV" -o none
 
 PG_PASSWORD=""; JWT=""; JWT_REFRESH=""; ANTHROPIC=""
 # "First deploy" = no successful deployment yet in this resource group. If a
 # first attempt failed partway, secrets are regenerated and rewritten in full.
 DEPLOYED="$(az deployment group list -g "$RG" \
   --query "length([?properties.provisioningState=='Succeeded'])" -o tsv)"
+
+if [[ "$DEPLOYED" == "0" && "$IN_CI" == "true" ]]; then
+  echo "${ENV} has never been deployed. Run ./infra/deploy.sh ${ENV} by hand once first." >&2
+  exit 1
+fi
 
 if [[ "$DEPLOYED" == "0" ]]; then
   say "First deploy of ${ENV}: generating database and JWT secrets"
@@ -122,4 +135,5 @@ WEB_URL="$(az deployment group show -g "$RG" -n "codifyai-${ENV}-${TAG}" \
   --query properties.outputs.webUrl.value -o tsv)"
 
 say "Done. ${ENV} is live at ${WEB_URL}"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then echo "web_url=${WEB_URL}" >> "$GITHUB_OUTPUT"; fi
 echo "API logs: az containerapp logs show -g ${RG} -n ca-codifyai-api-${ENV} --follow"

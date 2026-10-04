@@ -1,0 +1,46 @@
+# Every merge to main: run CI, build images once, deploy to staging, smoke test.
+# Prod is never touched here. Promote with the "Promote to prod" workflow.
+name: Deploy to staging
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # lets GitHub sign in to Azure with OIDC, no stored password
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  staging:
+    name: Deploy staging
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Build images and deploy
+        id: deploy
+        run: ./infra/deploy.sh staging
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+      - name: Smoke test
+        run: ./infra/smoke-test.sh "${{ steps.deploy.outputs.web_url }}"
+      - name: Summary
+        run: |
+          {
+            echo "### Staging deployed"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo "- URL: ${{ steps.deploy.outputs.web_url }}"
+            echo "- Promote to prod: Actions → **Promote to prod** → Run workflow"
+          } >> "$GITHUB_STEP_SUMMARY"

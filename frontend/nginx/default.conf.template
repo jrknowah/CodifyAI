@@ -16,6 +16,16 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
+    # API health check, used by the deploy smoke test (returns status and version only)
+    location = /healthz {
+        proxy_pass https://${BACKEND_FQDN}/health;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${BACKEND_FQDN};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Host ${BACKEND_FQDN};
+    }
+
     # Proxy /api to FastAPI over TLS inside the VNet
     location /api {
         proxy_pass https://${BACKEND_FQDN};

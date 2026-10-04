@@ -55,6 +55,27 @@ Later runs keep existing secrets. To replace the Anthropic key:
 If the first deploy fails on a Key Vault secret reference, the role assignment had not
 propagated yet. Wait two minutes and run it again.
 
+## Pipeline (GitHub Actions)
+
+| Workflow | Runs when | Does |
+|---|---|---|
+| `CI` | every pull request | backend tests, frontend lint + build, dependency/secret scan |
+| `Deploy to staging` | every merge to `main` | CI, then build images once, deploy staging, smoke test |
+| `Promote to prod` | you click **Run workflow** | deploy the same images to prod, smoke test |
+
+Running **Promote to prod** is the approval step, and the run log records who approved
+which commit and when. To roll back, run it again with an older commit SHA.
+
+GitHub signs in to Azure with OIDC (short-lived tokens, nothing stored). One-time setup,
+after the repo is in its company org and each environment has been deployed by hand once:
+
+```bash
+./infra/setup-github-oidc.sh <org>/codifyai
+```
+
+The pipeline never does a first deploy: those generate secrets and prompt for the
+Anthropic key, so they stay manual.
+
 ## Facility file drops (SFTP)
 
 Off by default because SFTP is billed hourly (~$220/mo) while enabled. When the first
@@ -73,7 +94,6 @@ per facility in the storage account.
   holds data you care about, so schema changes don't require manual SQL.
 - **Least-privilege database role.** The app connects as the server admin. Create an
   app role without UPDATE/DELETE on `audit_logs` as part of hardening.
-- **GitHub Actions** with OIDC to run this script on merge.
 
 ## Tearing down staging
 
