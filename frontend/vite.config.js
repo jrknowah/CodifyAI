@@ -11,6 +11,7 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/tests/setup.js',
+    include: ['src/tests/unit/**/*.test.{js,jsx}'],   // e2e specs run under Playwright
     coverage: {
       reporter: ['text', 'html'],
       exclude: ['node_modules/', 'src/tests/'],

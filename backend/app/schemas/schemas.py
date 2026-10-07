@@ -1,51 +1,48 @@
-from pydantic import BaseModel, EmailStr, field_validator, model_validator, ConfigDict
-from typing import Optional, List
+from pydantic import AfterValidator, BaseModel, EmailStr, field_validator, ConfigDict
+from typing import Annotated, Optional, List, Literal
 from datetime import datetime
 from uuid import UUID
 import re
-import html
 
 
 # ── Shared validators ─────────────────────────────────────────────────────────
 
-def sanitize_text(v: str) -> str:
-    """Strip HTML tags and normalize whitespace."""
-    cleaned = html.escape(v.strip())
-    # Collapse multiple whitespace
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    return cleaned
+def validate_password_policy(v: str) -> str:
+    if len(v) < 12:
+        raise ValueError("Password must be at least 12 characters.")
+    if len(v.encode("utf-8")) > 72:
+        raise ValueError("Password must be at most 72 bytes.")
+    if not re.search(r"[A-Z]", v):
+        raise ValueError("Password must contain an uppercase letter.")
+    if not re.search(r"[0-9]", v):
+        raise ValueError("Password must contain a number.")
+    if not re.search(r"[^A-Za-z0-9]", v):
+        raise ValueError("Password must contain a special character.")
+    return v
+
+
+def validate_full_name(v: str) -> str:
+    # Whitelist validation rather than HTML-escaping: escaping turned the apostrophe
+    # in names like O'Brien into "&#x27;", which the whitelist then rejected.
+    v = re.sub(r"\s+", " ", v.strip())
+    if len(v) < 2 or len(v) > 255:
+        raise ValueError("Full name must be 2–255 characters.")
+    if not re.match(r"^[A-Za-z\s\-'.]+$", v):
+        raise ValueError("Full name contains invalid characters.")
+    return v
+
+
+Password = Annotated[str, AfterValidator(validate_password_policy)]
+FullName = Annotated[str, AfterValidator(validate_full_name)]
+UserRoleName = Literal["admin", "coder", "viewer"]
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
-    full_name: str
-    facility_id: Optional[UUID] = None
-
-    @field_validator("password")
-    @classmethod
-    def validate_password(cls, v: str) -> str:
-        if len(v) < 12:
-            raise ValueError("Password must be at least 12 characters.")
-        if not re.search(r"[A-Z]", v):
-            raise ValueError("Password must contain an uppercase letter.")
-        if not re.search(r"[0-9]", v):
-            raise ValueError("Password must contain a number.")
-        if not re.search(r"[^A-Za-z0-9]", v):
-            raise ValueError("Password must contain a special character.")
-        return v
-
-    @field_validator("full_name")
-    @classmethod
-    def validate_name(cls, v: str) -> str:
-        v = sanitize_text(v)
-        if len(v) < 2 or len(v) > 255:
-            raise ValueError("Full name must be 2–255 characters.")
-        if not re.match(r"^[A-Za-z\s\-'.]+$", v):
-            raise ValueError("Full name contains invalid characters.")
-        return v
+    password: Password
+    full_name: FullName
 
 
 class UserLogin(BaseModel):
@@ -60,37 +57,64 @@ class UserOut(BaseModel):
     full_name: str
     role: str
     is_active: bool
+    mfa_enabled: bool
+    mfa_enrollment_required: bool = False
     last_login: Optional[datetime]
     created_at: datetime
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
+class LoginResponse(BaseModel):
+    """Either a session (access_token set, refresh token in an httpOnly cookie) or,
+    for MFA users, an mfa_token to exchange at /auth/mfa/verify."""
+    access_token: Optional[str] = None
     token_type: str = "bearer"
-    expires_in: int  # seconds
-
-
-class RefreshRequest(BaseModel):
-    refresh_token: str
+    expires_in: Optional[int] = None  # seconds
+    mfa_required: bool = False
+    mfa_token: Optional[str] = None
 
 
 class PasswordChange(BaseModel):
     current_password: str
-    new_password: str
+    new_password: Password
 
-    @field_validator("new_password")
-    @classmethod
-    def validate_password(cls, v: str) -> str:
-        if len(v) < 12:
-            raise ValueError("Password must be at least 12 characters.")
-        if not re.search(r"[A-Z]", v):
-            raise ValueError("Must contain an uppercase letter.")
-        if not re.search(r"[0-9]", v):
-            raise ValueError("Must contain a number.")
-        if not re.search(r"[^A-Za-z0-9]", v):
-            raise ValueError("Must contain a special character.")
-        return v
+
+class MfaVerifyRequest(BaseModel):
+    mfa_token: str
+    code: str
+
+
+class MfaSetupResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class MfaCodeRequest(BaseModel):
+    code: str
+
+
+class MfaDisableRequest(BaseModel):
+    password: str
+    code: str
+
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+class AdminUserCreate(UserCreate):
+    role: UserRoleName = "coder"
+    facility_id: Optional[UUID] = None
+
+
+class AdminUserUpdate(BaseModel):
+    full_name: Optional[FullName] = None
+    role: Optional[UserRoleName] = None
+    is_active: Optional[bool] = None
+    facility_id: Optional[UUID] = None
+
+
+class AdminUserOut(UserOut):
+    facility_id: Optional[UUID]
+    failed_login_attempts: int
+    locked_until: Optional[datetime]
 
 
 # ── Coding ────────────────────────────────────────────────────────────────────
@@ -112,18 +136,22 @@ class CodingRequest(BaseModel):
     @field_validator("facility_type")
     @classmethod
     def validate_facility_type(cls, v: str) -> str:
-        allowed = {"post-acute", "snf", "home-health", "irf"}
+        allowed = {"post-acute", "snf", "home-health", "irf", "urgent-care"}
         if v not in allowed:
-            raise ValueError(f"facility_type must be one of: {allowed}")
+            raise ValueError(f"facility_type must be one of: {sorted(allowed)}")
         return v
+
+
+CodeType = Literal["ICD-10-CM", "CPT", "HCPCS"]
 
 
 class CodeResult(BaseModel):
     code: str
-    type: str
+    type: CodeType
     description: str
     confidence: float
     reason: str
+    modifiers: List[str] = []
 
     @field_validator("confidence")
     @classmethod
@@ -141,9 +169,45 @@ class CodeResult(BaseModel):
         return v
 
 
+class FlaggedCode(BaseModel):
+    """A suggestion the server removed, and why. `code` is omitted for CPT when unlicensed."""
+    code: Optional[str]
+    type: str
+    issue: str
+
+
+class MdmElement(BaseModel):
+    level: str
+    support: str  # note text supporting the rating — returned, never stored
+
+
+class EmLevel(BaseModel):
+    """Suggested office/outpatient E/M level. `cpt_code` is only set when CPT-licensed."""
+    patient_type: Literal["new", "established"]
+    level: int
+    basis: Literal["mdm", "time"]
+    problems: MdmElement
+    data: MdmElement
+    risk: MdmElement
+    total_time_minutes: Optional[int]
+    modifiers: List[str]
+    confidence: float
+    mdm_level: str                  # computed: straightforward / low / moderate / high
+    computed_level: int             # computed from MDM (2 of 3) or documented time
+    consistent: bool                # model's level == computed level
+    consistency_notes: List[str]
+    cpt_code: Optional[str]
+    review_label: str
+
+
 class CodingResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     encounter_id: UUID
+    facility_type: str
     codes: List[CodeResult]
+    em_level: Optional[EmLevel] = None
+    flagged_codes: List[FlaggedCode] = []
+    cpt_licensed: bool
     summary: str
     model_used: str
     code_count: int
@@ -151,7 +215,7 @@ class CodingResponse(BaseModel):
 
 
 class EncounterSummary(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
     id: UUID
     note_length: int
     facility_type: str
@@ -166,9 +230,11 @@ class EncounterSummary(BaseModel):
 class AuditLogOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    user_id: Optional[UUID]
     action: str
     resource_id: Optional[str]
     ip_address: Optional[str]
+    user_agent: Optional[str]
     success: bool
     detail: Optional[dict]
     created_at: datetime

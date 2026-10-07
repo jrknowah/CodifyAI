@@ -1,10 +1,16 @@
 import anthropic
-import json
 import hashlib
+import hmac
+import logging
+from pydantic import ValidationError
 from app.core.config import settings
-from app.schemas.schemas import CodeResult, CodingResponse
+from app.schemas.schemas import CodeResult, CodingResponse, EmLevel, FlaggedCode
 from app.models.models import Encounter, FacilityType
 from app.services.audit_service import write_audit_log, AuditAction
+from app.services.coding_prompts import (
+    RECORD_TOOL_NAME, build_record_tool, build_system_prompt, requires_em_level,
+)
+from app.services.code_validation import check_em_level, validate_codes
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from fastapi import HTTPException, Request
@@ -12,41 +18,86 @@ from uuid import UUID
 from datetime import datetime, timezone
 import uuid
 
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+logger = logging.getLogger("codifyai.coding")
 
-SYSTEM_PROMPT = """You are CodifyAI, an expert medical coder specializing in post-acute care,
-skilled nursing facilities (SNF), recuperative care, and long-term care facilities.
+# Async client so a slow model call doesn't block the event loop for every other request.
+client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
-Analyze the clinical note and return ONLY a valid JSON object — no markdown, no preamble.
-
-Required structure:
-{
-  "codes": [
-    {
-      "code": "exact ICD-10-CM/CPT-4/HCPCS Level II code",
-      "type": "ICD-10" | "CPT" | "HCPCS",
-      "description": "full official code description",
-      "confidence": 0.0-1.0,
-      "reason": "one sentence citing specific note content supporting this code"
-    }
-  ],
-  "summary": "2-3 sentences: primary diagnosis, comorbidities captured, care setting coding context"
+# Fields of a code result that are safe to persist. `reason` (and the summary)
+# are written by the model about the note and can quote PHI — never stored.
+PERSISTED_CODE_FIELDS = {"code", "type", "description", "confidence", "modifiers"}
+# Same for E/M: levels and computed checks are kept, the MDM `support` text isn't.
+PERSISTED_EM_FIELDS = {
+    "patient_type", "level", "basis", "total_time_minutes", "modifiers", "confidence",
+    "mdm_level", "computed_level", "consistent", "cpt_code",
 }
 
-Coding rules:
-- Return 4-7 codes, primary diagnosis first
-- Use real, valid codes only
-- Apply ICD-10-CM specificity (laterality, acuity, episode of care)
-- Apply PDPM and MDS linkage awareness for SNF contexts
-- Sequence comorbidities after principal diagnosis
-- Flag procedure codes (CPT) separately from diagnostic codes (ICD-10)
-- Confidence >= 0.7 means the note clearly supports the code
-"""
+# One retry when the model answers without calling the tool (tool_choice can't be
+# forced on current models; strict mode only guarantees the arguments' shape).
+MAX_ATTEMPTS = 2
+
+
+class CodingOutputError(Exception):
+    """The model's answer couldn't be turned into a coding result."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _hash_note(note: str) -> str:
-    """SHA-256 hash of note — stored instead of note text (PHI protection)."""
-    return hashlib.sha256(note.encode("utf-8")).hexdigest()
+    """Keyed HMAC-SHA256 of the note — stored instead of note text (PHI protection).
+    Keyed so someone holding a candidate note can't confirm it against the database."""
+    return hmac.new(settings.encryption_key.encode(), note.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+async def _call_model(clinical_note: str, facility_type: str):
+    """Ask the model for a coding result via the strict `record_coding_result` tool.
+    Returns (tool_input, model_id). Raises CodingOutputError or anthropic.APIError."""
+    tool = build_record_tool(facility_type, settings.cpt_licensed)
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        message = await client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=settings.anthropic_max_tokens,
+            output_config={"effort": settings.anthropic_effort},
+            system=build_system_prompt(facility_type, settings.cpt_licensed),
+            tools=[tool],
+            tool_choice={"type": "auto"},
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Facility type: {facility_type}\n\n"
+                    f"<clinical_note>\n{clinical_note}\n</clinical_note>\n\n"
+                    f"Code this note and record the result with the {RECORD_TOOL_NAME} tool."
+                ),
+            }],
+        )
+        if message.stop_reason == "refusal":
+            raise CodingOutputError("refusal")
+        if message.stop_reason == "max_tokens":
+            raise CodingOutputError("max_tokens")
+        for block in message.content:
+            if block.type == "tool_use" and block.name == RECORD_TOOL_NAME:
+                return block.input, message.model
+        logger.warning("Model answered without calling %s (attempt %d)", RECORD_TOOL_NAME, attempt)
+    raise CodingOutputError("no_tool_call")
+
+
+def _build_result(raw: dict, facility_type: str):
+    """Validate the tool input. Returns (codes, em_level, flagged, summary)."""
+    try:
+        kept, flagged = validate_codes(raw["codes"], settings.cpt_licensed)
+        codes = [CodeResult(**c) for c in kept]
+        em_level = None
+        if requires_em_level(facility_type):
+            try:
+                em_level = EmLevel(**check_em_level(raw["em_level"], settings.cpt_licensed))
+            except (KeyError, ValueError) as e:
+                # A bad E/M suggestion shouldn't sink the diagnosis codes
+                flagged.append({"code": None, "type": "E/M", "issue": f"E/M suggestion dropped: {e}"[:200]})
+        return codes, em_level, [FlaggedCode(**f) for f in flagged], raw["summary"]
+    except (KeyError, TypeError, ValidationError) as e:
+        raise CodingOutputError(f"invalid_output:{type(e).__name__}")
 
 
 async def analyze_and_persist(
@@ -58,48 +109,39 @@ async def analyze_and_persist(
     facility_id: UUID | None,
 ) -> CodingResponse:
     """
-    Call Claude, parse results, persist encounter (without PHI), write audit log.
+    Call Claude, validate results, persist encounter (without PHI), write audit log.
     """
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Facility type: {facility_type}\n\nClinical Note:\n{clinical_note}"
-            }],
-        )
+        raw, model_used = await _call_model(clinical_note, facility_type)
+        codes, em_level, flagged, summary = _build_result(raw, facility_type)
     except anthropic.APIError as e:
         await write_audit_log(
             db, AuditAction.analyze, request,
             user_id=user_id,
-            detail={"error": str(e), "facility_type": facility_type},
+            detail={
+                "error": type(e).__name__,
+                "status_code": getattr(e, "status_code", None),
+                "facility_type": facility_type,
+            },
             success=False,
         )
         raise HTTPException(status_code=502, detail="AI service temporarily unavailable.")
-
-    raw = message.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1].lstrip("json").strip()
-
-    try:
-        parsed = json.loads(raw)
-        codes = [CodeResult(**c) for c in parsed["codes"]]
-        summary = parsed["summary"]
-    except (json.JSONDecodeError, KeyError, Exception) as e:
+    except CodingOutputError as e:
         await write_audit_log(
             db, AuditAction.analyze, request,
             user_id=user_id,
-            detail={"error": "parse_failure", "raw_length": len(raw)},
+            detail={"error": "output_failure", "reason": e.reason, "facility_type": facility_type},
             success=False,
         )
-        raise HTTPException(status_code=500, detail="Could not parse AI response. Please try again.")
+        if e.reason == "refusal":
+            raise HTTPException(status_code=502, detail="The AI declined to code this note. Please code it manually.")
+        raise HTTPException(status_code=502, detail="Could not get a valid coding result. Please try again.")
 
     encounter_id = uuid.uuid4()
     top_code = codes[0].code if codes else "N/A"
 
-    # Persist encounter — note hash only, never raw note text
+    # Persist encounter — note hash and de-identified results only; no note text,
+    # no model-written reasons, MDM support text or summary
     encounter = Encounter(
         id=encounter_id,
         user_id=user_id,
@@ -107,9 +149,10 @@ async def analyze_and_persist(
         note_hash=_hash_note(clinical_note),
         note_length=len(clinical_note),
         facility_type=FacilityType(facility_type),
-        codes=[c.model_dump() for c in codes],
-        summary=summary,
-        model_used=message.model,
+        codes=[c.model_dump(include=PERSISTED_CODE_FIELDS) for c in codes],
+        em_level=em_level.model_dump(include=PERSISTED_EM_FIELDS) if em_level else None,
+        flagged_codes=[f.model_dump() for f in flagged],
+        model_used=model_used,
         code_count=len(codes),
         top_code=top_code,
     )
@@ -123,19 +166,24 @@ async def analyze_and_persist(
             "facility_type": facility_type,
             "note_length": len(clinical_note),
             "code_count": len(codes),
+            "flagged_count": len(flagged),
+            "em_level": em_level.level if em_level else None,
             "top_code": top_code,
-            "model": message.model,
+            "model": model_used,
+            "cpt_licensed": settings.cpt_licensed,
         },
         success=True,
     )
 
-    await db.flush()
-
     return CodingResponse(
         encounter_id=encounter_id,
+        facility_type=facility_type,
         codes=codes,
+        em_level=em_level,
+        flagged_codes=flagged,
+        cpt_licensed=settings.cpt_licensed,
         summary=summary,
-        model_used=message.model,
+        model_used=model_used,
         code_count=len(codes),
         created_at=datetime.now(timezone.utc),
     )

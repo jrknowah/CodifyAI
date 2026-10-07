@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test'
-
-const USER = { email: 'coder@codifyai.com', password: 'CoderPass123!', name: 'Test Coder' }
+import { USER, loginAs } from './helpers'
 
 const SAMPLE_NOTE = `Patient is a 74-year-old male, POD #12 following right total hip arthroplasty.
 Admitted to recuperative care for skilled nursing and PT. PMH: essential hypertension
@@ -8,31 +7,10 @@ controlled on lisinopril, type 2 diabetes mellitus HbA1c 7.1%, hyperlipidemia.
 Currently ambulating 50 feet with rolling walker, pain 3/10, wound healing without
 erythema or drainage. Continue DVT prophylaxis with enoxaparin.`
 
-// Helper: register and login
-async function loginAs(page, user) {
-  await page.goto('/register')
-  await page.getByTestId('name-input').fill(user.name)
-  await page.getByTestId('email-input').fill(user.email)
-  await page.getByTestId('password-input').fill(user.password)
-  await page.click('button[type=submit]')
-
-  await page.goto('/login')
-  await page.getByTestId('email-input').fill(user.email)
-  await page.getByTestId('password-input').fill(user.password)
-  await page.getByTestId('login-button').click()
-  await expect(page).toHaveURL(/\/dashboard/)
-}
-
 test.describe('Coding workflow', () => {
-  test.beforeAll(async ({ browser }) => {
-    const page = await browser.newPage()
-    await loginAs(page, USER)
-    await page.close()
-  })
-
   test('dashboard loads with analyzer UI', async ({ page }) => {
     await loginAs(page, USER)
-    await expect(page.getByText('Code Analyzer')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Code Analyzer' })).toBeVisible()
     await expect(page.getByTestId('note-input')).toBeVisible()
     await expect(page.getByTestId('facility-select')).toBeVisible()
     await expect(page.getByTestId('analyze-button')).toBeVisible()

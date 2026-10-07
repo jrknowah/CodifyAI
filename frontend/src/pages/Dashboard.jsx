@@ -1,16 +1,18 @@
 import { useState } from 'react'
 import { codingApi } from '../services/api'
+import EmLevelCard from '../components/coding/EmLevelCard'
 import Sidebar from '../components/layout/Sidebar'
 import { Card, Button, Alert, SectionLabel, MonoBadge, Spinner } from '../components/ui'
 
 const SAMPLES = {
+  'Strep (Urgent Care)': `Established patient, 34-year-old female, presents with 3 days of sore throat, fever to 101.4F, and painful swallowing. No cough. Exam: tonsillar exudates, tender anterior cervical lymphadenopathy. Rapid strep antigen ordered and reviewed: positive. Assessment: streptococcal pharyngitis. Plan: amoxicillin 500 mg PO BID x 10 days, ibuprofen as needed, return if unable to tolerate fluids. Total time 25 minutes.`,
   'Hip Replacement': `Patient is a 74-year-old male, POD #12 following right total hip arthroplasty. Admitted to recuperative care for skilled nursing and PT. PMH: essential hypertension (controlled on lisinopril), type 2 diabetes mellitus (HbA1c 7.1%), hyperlipidemia. Currently ambulating 50 feet with rolling walker, pain 3/10, wound healing without erythema or drainage. Continue DVT prophylaxis with enoxaparin. Blood glucose monitoring BID, values within target range.`,
   'Stroke Recovery': `Patient is a 68-year-old female recovering from left MCA ischemic stroke 3 weeks prior. Right-sided hemiparesis strength 3/5, expressive aphasia improving. PMH: atrial fibrillation on apixaban, hypertension, GERD. Transfers with minimal assist, sitting balance good, standing balance fair. Speech intelligibility approximately 70%. Dysphagia screen passed. Continue anticoagulation. Fall prevention protocol in place.`,
   'Wound Care':      `Patient is an 82-year-old female with stage III pressure ulcer to the right sacral region. PMH: type 2 diabetes with peripheral neuropathy, obesity BMI 36, hypertension, vascular dementia moderate stage. Wound measures 4.2cm x 3.8cm x 1.1cm with pink granulation tissue and minimal serous exudate. Wound care BID with collagenase ointment and non-adherent dressing. High-protein supplement ordered.`,
 }
 
 const TYPE_STYLES = {
-  'ICD-10': { bg: 'rgba(52,152,219,0.12)', color: '#3498db' },
+  'ICD-10-CM': { bg: 'rgba(52,152,219,0.12)', color: '#3498db' },
   'CPT':    { bg: 'rgba(155,89,182,0.12)', color: '#9b59b6' },
   'HCPCS':  { bg: 'rgba(230,126,34,0.12)', color: '#e67e22' },
 }
@@ -34,8 +36,11 @@ export default function Dashboard() {
       const detail = err.response?.data?.detail
       if (err.response?.status === 429) {
         setError('Too many requests. Please wait a moment and try again.')
+      } else if (err.response?.status === 403) {
+        setError('Your account has view-only access. Ask an administrator for coder access to run analyses.')
       } else {
-        setError(detail || 'Analysis failed. Please try again.')
+        // 422 validation errors arrive as a list, not a string
+        setError(typeof detail === 'string' ? detail : detail?.[0]?.msg || 'Analysis failed. Please try again.')
       }
     } finally {
       setLoading(false)
@@ -56,7 +61,7 @@ export default function Dashboard() {
             Code Analyzer
           </h1>
           <p style={{ color: '#6B9E8A', fontSize: 14 }}>
-            Paste a clinical note to generate ICD-10, CPT, and HCPCS suggestions. <kbd style={{ fontSize: 11, background: '#1f2f26', borderRadius: 4, padding: '2px 6px', color: '#6B9E8A' }}>Ctrl+Enter</kbd> to analyze.
+            Paste a signed visit note to generate ICD-10-CM and HCPCS suggestions (plus an E/M level for urgent care). <kbd style={{ fontSize: 11, background: '#1f2f26', borderRadius: 4, padding: '2px 6px', color: '#6B9E8A' }}>Ctrl+Enter</kbd> to analyze.
           </p>
         </div>
 
@@ -76,6 +81,7 @@ export default function Dashboard() {
                 <option value="snf">Skilled Nursing Facility</option>
                 <option value="home-health">Home Health</option>
                 <option value="irf">Inpatient Rehab (IRF)</option>
+                <option value="urgent-care">Urgent Care</option>
               </select>
             </div>
 
@@ -101,7 +107,7 @@ export default function Dashboard() {
             {/* Sample loaders */}
             <div style={{ display: 'flex', gap: 8, marginTop: '0.75rem', flexWrap: 'wrap' }}>
               {Object.keys(SAMPLES).map(k => (
-                <button key={k} onClick={() => { setNote(SAMPLES[k]); setError('') }}
+                <button key={k} onClick={() => { setNote(SAMPLES[k]); setError(''); if (k.includes('Urgent Care')) setFacilityType('urgent-care') }}
                   style={{ background: 'none', border: '1px solid #1f2f26', borderRadius: 6, color: '#6B9E8A', fontSize: 11, fontFamily: 'monospace', padding: '4px 10px', cursor: 'pointer' }}>
                   {k}
                 </button>
@@ -154,7 +160,7 @@ export default function Dashboard() {
                   return (
                     <div key={i} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid #1f2f26', borderRadius: 10, padding: '14px 16px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                        <MonoBadge>{c.code}</MonoBadge>
+                        <MonoBadge>{c.code}{c.modifiers?.length ? `-${c.modifiers.join('-')}` : ''}</MonoBadge>
                         <span style={{ fontSize: 10, fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '1.5px', padding: '3px 8px', borderRadius: 4, background: ts.bg, color: ts.color }}>
                           {c.type}
                         </span>
@@ -172,6 +178,17 @@ export default function Dashboard() {
                     </div>
                   )
                 })}
+
+                {result.em_level && <EmLevelCard em={result.em_level} />}
+
+                {result.flagged_codes?.length > 0 && (
+                  <div data-testid="flagged-codes" style={{ border: '1px solid rgba(243,156,18,0.3)', borderRadius: 10, padding: '10px 16px', fontSize: 12, color: '#f39c12' }}>
+                    <p style={{ fontSize: 10, fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 4 }}>Removed by validation</p>
+                    {result.flagged_codes.map((f, i) => (
+                      <p key={i}>{f.code ? `${f.code} (${f.type})` : f.type}: {f.issue}</p>
+                    ))}
+                  </div>
+                )}
 
                 <div style={{ background: 'rgba(13,122,95,0.08)', border: '1px solid rgba(13,122,95,0.2)', borderRadius: 10, padding: '14px 16px' }}>
                   <p style={{ fontSize: 10, fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '2px', color: '#12A07C', marginBottom: 6 }}>Clinical Rationale</p>

@@ -1,10 +1,5 @@
 import { test, expect } from '@playwright/test'
-
-const TEST_USER = {
-  email: 'e2e@codifyai.com',
-  password: 'E2eTestPass123!',
-  name: 'E2E Tester',
-}
+import { loginAs } from './helpers'
 
 test.describe('Authentication flows', () => {
   test.beforeEach(async ({ page }) => {
@@ -30,29 +25,25 @@ test.describe('Authentication flows', () => {
     await expect(page).toHaveURL(/\/login/)
   })
 
-  test('register → login → dashboard flow', async ({ page }) => {
-    // Register
-    await page.click('text=Register')
-    await page.getByTestId('name-input').fill(TEST_USER.name)
-    await page.getByTestId('email-input').fill(TEST_USER.email)
-    await page.getByTestId('password-input').fill(TEST_USER.password)
-    await page.click('button[type=submit]')
+  test('has no public registration', async ({ page }) => {
+    await expect(page.getByText(/^Register$/)).toHaveCount(0)
+    await page.goto('/register')
     await expect(page).toHaveURL(/\/login/)
+  })
 
-    // Login
-    await page.getByTestId('email-input').fill(TEST_USER.email)
-    await page.getByTestId('password-input').fill(TEST_USER.password)
-    await page.getByTestId('login-button').click()
+  test('login → dashboard flow', async ({ page }) => {
+    await loginAs(page)
+    await expect(page.getByRole('heading', { name: 'Code Analyzer' })).toBeVisible()
+  })
+
+  test('session survives a reload (httpOnly refresh cookie)', async ({ page }) => {
+    await loginAs(page)
+    await page.reload()
     await expect(page).toHaveURL(/\/dashboard/)
-    await expect(page.getByText('Code Analyzer')).toBeVisible()
   })
 
   test('logout clears session and redirects to login', async ({ page }) => {
-    // Login first
-    await page.getByTestId('email-input').fill(TEST_USER.email)
-    await page.getByTestId('password-input').fill(TEST_USER.password)
-    await page.getByTestId('login-button').click()
-    await expect(page).toHaveURL(/\/dashboard/)
+    await loginAs(page)
 
     // Logout
     await page.click('button:has-text("Sign out")')

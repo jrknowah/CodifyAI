@@ -1,5 +1,4 @@
-version: '3.9'
-
+# Local development only. Production runs on managed services (see README).
 services:
 
   db:
@@ -7,12 +6,12 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: codifyai
-      POSTGRES_PASSWORD: changeme
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: codifyai
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # localhost only — never expose the DB to the network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U codifyai"]
       interval: 5s
@@ -24,10 +23,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: codifyai
-      POSTGRES_PASSWORD: changeme
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: codifyai_test
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U codifyai"]
       interval: 5s
@@ -41,11 +40,14 @@ services:
     restart: unless-stopped
     env_file:
       - ./backend/.env
+    environment:
+      # Inside the compose network the database host is `db`, not localhost
+      DATABASE_URL: postgresql+asyncpg://codifyai:${POSTGRES_PASSWORD:-changeme}@db:5432/codifyai
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     depends_on:
       db:
         condition: service_healthy
@@ -56,7 +58,7 @@ services:
       dockerfile: Dockerfile.dev
     restart: unless-stopped
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules
