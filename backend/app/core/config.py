@@ -19,7 +19,14 @@ class Settings(BaseSettings):
 
     # ── Anthropic ────────────────────────────────────────────────────────────
     anthropic_api_key: str
-    anthropic_model: str = "claude-sonnet-4-20250514"
+    anthropic_model: str = "claude-opus-5-5"
+    anthropic_effort: str = "high"          # low | medium | high | xhigh | max
+    anthropic_max_tokens: int = 16000
+
+    # ── CPT® ─────────────────────────────────────────────────────────────────
+    # CPT codes and descriptors are AMA-licensed content. Until a license is in
+    # place, no CPT codes or descriptors are returned; E/M is a level only.
+    cpt_licensed: bool = False
 
     # ── JWT ──────────────────────────────────────────────────────────────────
     secret_key: str
@@ -63,6 +70,13 @@ class Settings(BaseSettings):
     def validate_api_key(cls, v: str) -> str:
         if not v.startswith("sk-ant-"):
             raise ValueError("ANTHROPIC_API_KEY must start with 'sk-ant-'")
+        return v
+
+    @field_validator("anthropic_effort")
+    @classmethod
+    def validate_effort(cls, v: str) -> str:
+        if v not in {"low", "medium", "high", "xhigh", "max"}:
+            raise ValueError("ANTHROPIC_EFFORT must be low, medium, high, xhigh or max")
         return v
 
     @field_validator("encryption_key")

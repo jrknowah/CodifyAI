@@ -136,18 +136,22 @@ class CodingRequest(BaseModel):
     @field_validator("facility_type")
     @classmethod
     def validate_facility_type(cls, v: str) -> str:
-        allowed = {"post-acute", "snf", "home-health", "irf"}
+        allowed = {"post-acute", "snf", "home-health", "irf", "urgent-care"}
         if v not in allowed:
-            raise ValueError(f"facility_type must be one of: {allowed}")
+            raise ValueError(f"facility_type must be one of: {sorted(allowed)}")
         return v
+
+
+CodeType = Literal["ICD-10-CM", "CPT", "HCPCS"]
 
 
 class CodeResult(BaseModel):
     code: str
-    type: str
+    type: CodeType
     description: str
     confidence: float
     reason: str
+    modifiers: List[str] = []
 
     @field_validator("confidence")
     @classmethod
@@ -165,10 +169,45 @@ class CodeResult(BaseModel):
         return v
 
 
+class FlaggedCode(BaseModel):
+    """A suggestion the server removed, and why. `code` is omitted for CPT when unlicensed."""
+    code: Optional[str]
+    type: str
+    issue: str
+
+
+class MdmElement(BaseModel):
+    level: str
+    support: str  # note text supporting the rating — returned, never stored
+
+
+class EmLevel(BaseModel):
+    """Suggested office/outpatient E/M level. `cpt_code` is only set when CPT-licensed."""
+    patient_type: Literal["new", "established"]
+    level: int
+    basis: Literal["mdm", "time"]
+    problems: MdmElement
+    data: MdmElement
+    risk: MdmElement
+    total_time_minutes: Optional[int]
+    modifiers: List[str]
+    confidence: float
+    mdm_level: str                  # computed: straightforward / low / moderate / high
+    computed_level: int             # computed from MDM (2 of 3) or documented time
+    consistent: bool                # model's level == computed level
+    consistency_notes: List[str]
+    cpt_code: Optional[str]
+    review_label: str
+
+
 class CodingResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     encounter_id: UUID
+    facility_type: str
     codes: List[CodeResult]
+    em_level: Optional[EmLevel] = None
+    flagged_codes: List[FlaggedCode] = []
+    cpt_licensed: bool
     summary: str
     model_used: str
     code_count: int

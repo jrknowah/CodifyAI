@@ -27,6 +27,7 @@ class FacilityType(str, enum.Enum):
     snf = "snf"
     home_health = "home-health"
     irf = "irf"
+    urgent_care = "urgent-care"
 
 
 class AuditAction(str, enum.Enum):
@@ -123,7 +124,11 @@ class Encounter(Base):
     facility_type: Mapped[FacilityType] = mapped_column(SAEnum(FacilityType), default=FacilityType.post_acute)
 
     # Results
-    codes: Mapped[list] = mapped_column(JSON, nullable=False)       # [{code, type, description, confidence}]
+    codes: Mapped[list] = mapped_column(JSON, nullable=False)       # [{code, type, description, confidence, modifiers}]
+    # E/M suggestion (urgent care): levels and computed checks only — no support text
+    em_level: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Suggestions the server dropped (bad format, unlicensed CPT) and why
+    flagged_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
     model_used: Mapped[str] = mapped_column(String(100), nullable=False)
     code_count: Mapped[int] = mapped_column(Integer, nullable=False)
     top_code: Mapped[str] = mapped_column(String(20), nullable=False)
