@@ -15,6 +15,12 @@ def _request_scheme(request: Request) -> str:
     return request.url.scheme
 
 
+# Platform health probes call the container directly over plain HTTP, with no
+# proxy in front. They must get a 200, not a redirect. /health returns only
+# status, version and environment name.
+HTTPS_EXEMPT_PATHS = {"/health"}
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """
     Adds HIPAA-aligned security headers to every response.
@@ -40,7 +46,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # HTTPS redirect in production
-        if settings.enforce_https and _request_scheme(request) == "http":
+        if (
+            settings.enforce_https
+            and request.url.path not in HTTPS_EXEMPT_PATHS
+            and _request_scheme(request) == "http"
+        ):
             https_url = str(request.url).replace("http://", "https://", 1)
             return RedirectResponse(https_url, status_code=301)
 

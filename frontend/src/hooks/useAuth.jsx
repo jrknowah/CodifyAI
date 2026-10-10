@@ -92,6 +92,8 @@ export function AuthProvider({ children }) {
   )
 }
 
+// The hook lives beside its provider on purpose; fast refresh falls back to a full reload here.
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAuth = () => {
   const ctx = useContext(AuthContext)
   if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
