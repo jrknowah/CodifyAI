@@ -1,0 +1,53 @@
+# Promotes images already tested in staging to prod. Nothing is rebuilt.
+# Running this workflow IS the approval: Actions → Promote to prod → Run workflow.
+# Also the rollback path: enter an older commit SHA that was deployed to staging.
+name: Promote to prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Full commit SHA to promote (blank = latest commit on main)
+        required: false
+        default: ""
+      confirm:
+        description: Type "prod" to confirm
+        required: true
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prod:
+    name: Deploy prod
+    # Skipped until infra/setup-github-oidc.sh has set the Azure variables.
+    if: github.ref == 'refs/heads/main' && inputs.confirm == 'prod' && vars.AZURE_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Promote images and deploy
+        id: deploy
+        run: ./infra/deploy.sh prod
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+      - name: Smoke test
+        run: ./infra/smoke-test.sh "${{ steps.deploy.outputs.web_url }}"
+      - name: Summary
+        run: |
+          TAG="${{ inputs.image_tag || github.sha }}"
+          {
+            echo "### Prod deployed"
+            echo "- Commit: \`${TAG::7}\`"
+            echo "- Approved by: @${{ github.actor }}"
+            echo "- URL: ${{ steps.deploy.outputs.web_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

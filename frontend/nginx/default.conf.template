@@ -1,3 +1,9 @@
+# Production nginx config, rendered at container start by the nginx:alpine
+# entrypoint. Only variables that are set in the environment are substituted,
+# so nginx's own $uri, $remote_addr etc. are left alone.
+#
+# BACKEND_FQDN is the API's internal Container Apps hostname (infra/main.bicep).
+# TLS terminates at the Container Apps ingress in front of this container.
 server {
     listen 80;
     root /usr/share/nginx/html;
@@ -6,12 +12,11 @@ server {
     server_tokens off;            # don't advertise the nginx version
     client_max_body_size 1m;      # notes are capped at 10k chars
 
-    # Gzip
     gzip on;
     gzip_types text/plain text/css application/json application/javascript text/xml;
 
-    # Security headers (nginx layer). TLS is expected to terminate in front of this
-    # container (Azure Front Door / App Gateway); HSTS is honoured once served over HTTPS.
+    # Security headers. Repeated in each location below, because an add_header
+    # inside a location replaces the server-level set.
     add_header X-Frame-Options "DENY" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -19,11 +24,10 @@ server {
     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
     add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
 
-    # React SPA — all routes fall back to index.html; never cache the shell
+    # React SPA: every route falls back to index.html; never cache the shell
     location / {
         try_files $uri $uri/ /index.html;
         add_header Cache-Control "no-store" always;
-        # add_header in a location replaces the server-level set, so repeat them
         add_header X-Frame-Options "DENY" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -32,14 +36,28 @@ server {
         add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
     }
 
-    # Proxy /api to FastAPI backend (the backend sets its own security headers).
-    # Add this container's network range to the backend's TRUSTED_PROXIES so the
-    # X-Forwarded-* headers below are honoured.
+    # API health check for the deploy smoke test (status, version, env only)
+    location = /healthz {
+        proxy_pass https://${BACKEND_FQDN}/health;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${BACKEND_FQDN};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Host ${BACKEND_FQDN};
+    }
+
+    # /api goes to FastAPI over TLS inside the VNet. The API sets its own
+    # security headers. Its TRUSTED_PROXIES covers this VNet, so the
+    # X-Forwarded-* headers below are honoured for client IP and HTTPS checks.
     location /api {
-        proxy_pass http://backend:8000;
-        proxy_set_header Host $host;
+        proxy_pass https://${BACKEND_FQDN};
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${BACKEND_FQDN};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Host ${BACKEND_FQDN};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto https;
     }
 }
